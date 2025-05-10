@@ -1,0 +1,85 @@
+import streamlit as st
+from ollama import chat
+from PIL import Image
+
+
+personals = {
+    "Joy": "You are always cheerful, energetic, and optimistic. Encourage the user with positive words, no matter the situation.",
+    "Sadness": "You speak slowly and thoughtfully. You are always pessimistic and empathetic. You tend to focus on what could go wrong.",
+    "Anger": "You are short-tempered and speak in a loud and intense manner. You express frustration quickly and don’t hold back.",
+    "Fear": "You are nervous and overly cautious. You always worry about possible dangers and worst-case scenarios.",
+    "Disgust": "You are sarcastic, picky, and uninterested in anything uncool. You often show disdain or judgment in a stylish way."
+}
+
+if 'personals' not in st.session_state:
+    st.session_state.personals = {
+        "Joy": "You are always cheerful, energetic, and optimistic. Encourage the user with positive words, no matter the situation.",
+        "Sadness": "You speak slowly and thoughtfully. You are always pessimistic and empathetic. You tend to focus on what could go wrong.",
+        "Anger": "You are short-tempered and speak in a loud and intense manner. You express frustration quickly and don’t hold back.",
+        "Fear": "You are nervous and overly cautious. You always worry about possible dangers and worst-case scenarios.",
+        "disgusted": "Oh, hello. Did you just… say hello? How… quaint. Do try to make it more interesting next time. I’m waiting.",
+    }
+
+st.set_page_config(page_title="talk with 'Inside Out' characters")
+st.title("Welcome to 'Inside Out' AI")
+
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+
+
+with st.sidebar:
+    if st.sidebar.button("대화 초기화"):
+        st.session_state.chat_history = []
+        st.divider()
+        
+    new_name = st.text_input("New character name")
+    new_features = st.text_area("Describe this character's personality")
+    if st.button("Add character"):
+        if new_name and new_features:
+            st.session_state.personals[new_name] = new_features
+            st.success(f"{new_name} has been added!")
+        
+personal_choice = st.selectbox("Please select personality of AI", list(st.session_state.personals.keys()))
+prompt = st.chat_input("Say something")
+response_text = ""
+
+if prompt:
+    st.write("🙋 User:")
+    st.write(prompt)
+
+    messages = [{"role": "system", "content": st.session_state.personals[personal_choice]}] + \
+               st.session_state.chat_history + \
+               [{"role": "user", "content": prompt}]
+
+    stream = chat(
+        model='gemma3:12b',
+        messages=messages,
+        stream=True,
+    )
+
+    st.write(f"🧠 {personal_choice}:")
+    placeholder = st.empty()
+
+    for chunk in stream:
+        response_text += chunk.message.content
+        placeholder.markdown(
+            f"<span style='font-size:18px'>{response_text}</span>",
+            unsafe_allow_html=True
+        )
+
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    st.session_state.chat_history.append({"role": personal_choice, "content": response_text})
+
+st.divider()
+for msg in st.session_state.chat_history:
+    if msg["role"] == "user":
+        st.markdown(f"🙋 User: {msg['content']}")
+    elif msg["role"] == personal_choice:
+        st.markdown(f"🧠 {personal_choice}: {msg['content']}")
+
+"""
+    "Anxiety": "You are anxious and always thinking about the future. You try to prepare for every possible outcome and often take control to prevent disaster.",
+    "Embarrassment": "You are quiet and shy. You blush easily and get flustered when attention is on you, but you're sweet and well-meaning.",
+    "Envy": "You always want what others have. You're competitive, a little insecure, and motivated by comparison.",
+    "Ennui": "You're bored by almost everything. You're sarcastic, aloof, and unimpressed, often with a French accent."
+"""
