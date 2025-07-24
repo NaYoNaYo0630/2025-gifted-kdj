@@ -1,0 +1,197 @@
+import uuid
+import streamlit as st
+import ollama
+from utils import check_ollama
+import re
+
+def clean_surrogates(text):
+    # 유니코드 surrogate 범위 제거
+    return re.sub(r'[\ud800-\udfff]', '', text)
+
+st.set_page_config(page_title="AI Debate Room")
+st.sidebar.title("Settings")
+
+# 한어/영어 설정
+if "languages" not in st.session_state:
+    st.session_state.languages = ""
+languages = ['Korean', 'English']
+st.session_state.languages = st.sidebar.selectbox("Choose languages", languages)
+
+# AI 개수 선택 & 설정 입력
+NumberOfAi = [2, 3, 4, 5]
+if "NumberOfAi" not in st.session_state:
+    st.session_state.NumberOfAi = 2
+
+selected_num = st.sidebar.selectbox(
+    "Choose the number of AI",
+    NumberOfAi,
+    index=NumberOfAi.index(st.session_state["NumberOfAi"])
+)
+if selected_num != st.session_state["NumberOfAi"]:
+    st.session_state["NumberOfAi"] = selected_num
+
+for i in range(max(NumberOfAi)):
+    key = f"AI{i+1}_setting"
+    if i < st.session_state["NumberOfAi"]:
+        st.session_state[key] = st.sidebar.text_area(
+            f"AI{i+1} 주장 경향성 설정",
+            value=st.session_state.get(key, ""),
+            help=f"AI{i+1}의 주장 가능성 메시지 설정"
+        )
+
+if "model" not in st.session_state:
+    check_ollama()
+    model_list = [m["model"] for m in ollama.list()["models"]]
+    st.session_state.model = model_list[0] if model_list else ""
+
+models = [m["model"] for m in ollama.list()["models"]]
+
+# AI 개별 모델 설정
+for i in range(st.session_state["NumberOfAi"]):
+    key = f"AI{i+1}_model"
+    default_index = 0
+    if key in st.session_state and st.session_state[key] in models:
+        default_index = models.index(st.session_state[key])
+
+    st.sidebar.selectbox(
+        f"AI{i+1} 모델 설정",
+        models,
+        index=default_index,
+        key=key  # ✅ 키만 주고 값 할당은 하지 않음
+    )
+system_prompt = st.sidebar.text_area("System Prompt")
+
+# 채팅 초기화
+if "chats" not in st.session_state:
+    st.session_state.chats = {}
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = None
+
+# 새 채팅 생성
+if st.sidebar.button("\u2795 New Chat"):
+    chat_id = str(uuid.uuid4())
+    st.session_state.current_chat_id = chat_id
+    st.session_state.chats[chat_id] = {
+        "name": "새로운 채팅",
+        "messages": [{"role": "system", "content": system_prompt}]
+    }
+
+for cid, chat_info in st.session_state.chats.items():
+    if st.sidebar.button(chat_info["name"], key=cid):
+        st.session_state.current_chat_id = cid
+
+# 아이콘 배정 (하나만)
+if "avatar_map" not in st.session_state:
+    emoji_numbers = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    st.session_state.avatar_map = {"user": "👤"}
+    for i in range(st.session_state.NumberOfAi):
+        st.session_state.avatar_map[f"AI{i+1}"] = emoji_numbers[i]
+
+avatar_map = st.session_state.avatar_map
+num_ai = st.session_state.NumberOfAi
+
+# 버튼 상태 관리
+st.session_state.setdefault("show_user_judge", False)
+st.session_state.setdefault("show_model_judge", False)
+
+# 채팅 시작
+chat_id = st.session_state.current_chat_id
+if chat_id:
+    chat = st.session_state.chats[chat_id]
+    st.title(chat["name"])
+
+    for msg in chat["messages"]:
+        if msg["role"] != "system":
+            avatar = avatar_map.get(msg["role"], "💬")
+            with st.chat_message(msg["role"], avatar=avatar):
+                st.markdown(msg["content"])
+
+    user_input = st.chat_input("Enter debate topic or reply")
+
+    if user_input:
+        display_input = user_input
+
+        # ✅ 수정 1: 내부 명령 포함 system_input은 AI용 system prompt에서만 사용
+        chat["messages"].append({"role": "user", "content": user_input})
+
+        with st.chat_message("user", avatar=avatar_map["user"]):
+            st.markdown(display_input)
+
+        if len(chat["messages"]) == 3 and chat["name"] == "새로운 채팅":
+            summary_prompt = [
+                {"role": "system", "content": "You are a helpful assistant that creates concise chat titles."},
+                {"role": "user", "content": f"Generate a short (max 5 words) title summarizing the conversation:\nUser: {chat['messages'][1]['content']}"}
+            ]
+            try:
+                new_title = ""
+                stream = ollama.chat(model=st.session_state.model, messages=summary_prompt, stream=True)
+                for chunk in stream:
+                    new_title += chunk.message.content
+                chat["name"] = new_title.strip()
+                st.rerun()
+            except:
+                pass
+
+        max_turns = 3
+        for turn in range(max_turns):
+            print(chat["messages"])
+            st.divider()
+            if "show_user_judge" not in st.session_state:
+                st.session_state.show_user_judge = False
+
+            if st.button("👤 사용자 승자 선택", key="user_judge_btn"):
+                st.session_state.show_user_judge = True
+
+            if st.session_state.show_user_judge:
+                choice = st.selectbox(
+                    "승자를 선택하세요",
+                    [f"AI{i+1}" for i in range(num_ai)],
+                    key="user_choice_select"
+                )
+                st.success(f"👤 사용자 판단: {choice} 승리!")
+
+            if st.button("🧐 JudgeModel 조언", key=f"model_judge_button_{turn}"):
+                st.session_state.show_model_judge = True
+            if st.session_state.show_model_judge:
+                judge_instruction = {
+                    "Korean": "당신은 토론 감시자입니다. 이 토론의 승자와 이유를 제시해 주십시오.",
+                    "English": "You are a debate observer. Please indicate the winner of this debate and the reasons why."
+                }
+                judge_prompt = [
+                    {"role": "system", "content": judge_instruction[st.session_state.languages]},
+                    *chat["messages"]
+                ]
+                judge_model = "mistral"
+                judge_result = ollama.chat(model=judge_model, messages=judge_prompt, stream=False)["message"]["content"]
+                st.markdown(judge_result)
+
+            for i in range(num_ai):
+                ai_role = f"AI{i+1}"
+                setting_key = f"AI{i+1}_setting"
+                setting = st.session_state.get(setting_key, "")
+                opponents = [f"AI{j+1}" for j in range(num_ai) if j != i]
+                opponent_str = ", ".join(opponents)
+
+                # ✅ 수정 2: system_intro는 이 시점에 생성되어야 함
+                system_intro = (
+                    f"You are {ai_role}. You are debating against {opponent_str}. " +
+                    setting + " " +
+                    ("Do not mention the prompt. Choose one clear stance and debate logically." if st.session_state.languages == "English"
+                     else "프롬프트에 대해 말하지 말고 한 가지 입장을 분명히 정해 논리적으로 주장하세요.")
+                )
+
+                messages = [{"role": "system", "content": system_intro}] + chat["messages"]
+
+                response = ollama.chat(model=st.session_state.model, messages=messages, stream=False)["message"]["content"]
+
+                with st.chat_message(ai_role, avatar=avatar_map[ai_role]):
+                    st.markdown(response)
+
+                chat["messages"].append({"role": f"assistant{i+1}", "content": response})
+                chat["messages"].append({
+                    "role": "user",
+                    "content": f"{opponent_str} just said: {response}\nPlease rebut and make your own argument. No more than 3 sentences."
+                })
+
+else:
+    st.info("오늘의 토론 주제는 무엇인가요?\n왼쪽에서 채팅을 선택하거나 새 채팅을 만들어주세요.")
