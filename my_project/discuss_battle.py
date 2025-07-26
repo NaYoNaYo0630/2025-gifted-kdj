@@ -10,7 +10,7 @@ llama3.2:latest
 import uuid
 import streamlit as st
 import ollama
-from utils import check_ollama
+from pages.utils import check_ollama
 import re
 
 def clean_surrogates(text):
