@@ -205,27 +205,48 @@ st.sidebar.markdown("### ⚙️ 공통 설정")
 temperature = st.sidebar.slider("temperature", 0.0, 1.5, 0.2, 0.1)
 top_p = st.sidebar.slider("top_p", 0.1, 1.0, 0.9, 0.05)
 max_sents = st.sidebar.slider("발언 문장 수(권장 최대)", 3, 8, 6, 1)
+max_turns = st.sidebar.slider("토론 최대 턴수", 3,8,6,1)
 
 system_prompt = st.sidebar.text_area("System Prompt")
 
-# 세션 상태
 if "chats" not in st.session_state:
     st.session_state.chats = {}
+
 if "current_chat_id" not in st.session_state:
     st.session_state.current_chat_id = None
 
-if st.sidebar.button("\u2795 New Chat"):
-    chat_id = str(uuid.uuid4())
-    st.session_state.current_chat_id = chat_id
-    st.session_state.chats[chat_id] = {
-        "name": "st.chat_input()",
-        "messages": [{"role": "system", "content": system_prompt}]
-    }
+# ── 다이얼로그 정의 ─────────────────────────────────────────
+@st.dialog("새 채팅 만들기")
+def new_chat_dialog():
+    chatings_name = st.text_input("채팅 이름을 입력하세요", key="dlg_new_chat_name")
+    if st.button("확인", key="dlg_new_chat_ok"):
+        name = (chatings_name or "").strip() or "Untitled Chat"
+        chat_id = str(uuid.uuid4())
+        st.session_state.current_chat_id = chat_id
+        st.session_state.chats[chat_id] = {
+            "name": name,
+            "messages": []
+        }
+        st.rerun()
 
-# 채팅 목록
-for cid, chat_info in st.session_state.chats.items():
-    if st.sidebar.button(chat_info["name"], key=cid):
+# ── 새 채팅 버튼(사이드바) ──────────────────────────────────
+if st.sidebar.button("➕ New Chat", key="sidebar_new_chat"):
+    new_chat_dialog()
+
+# ── 기존 잘못된 name 값 정리(예방) ──────────────────────────
+for _cid, _info in st.session_state.chats.items():
+    nm = _info.get("name")
+    if not isinstance(nm, str) or not nm.strip():
+        _info["name"] = "Untitled Chat"
+
+# ── 채팅 목록 1회만 렌더 + key 네임스페이스 부여 ────────────
+for cid, chat_info in list(st.session_state.chats.items()):
+    label = (chat_info.get("name") or "").strip() or "Untitled Chat"
+    btn_key = f"chat_btn_{cid}"          # ← 고유 key로 충돌 방지
+    if st.sidebar.button(label, key=btn_key):
         st.session_state.current_chat_id = cid
+        st.rerun()
+
 
 emoji_numbers = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 st.session_state.avatar_map = {f"AI{i+1}": emoji_numbers[i] for i in range(st.session_state["NumberOfAi"]) }
@@ -353,8 +374,8 @@ if chat_id:
             opponent_str = ", ".join([f"AI{j+1}" for j in range(num_ai) if j != ai_idx])
             system_intro = (
                 f"You are {ai_role}. Continue your argument logically against {opponent_str}. {setting} "
-                + ("Do not mention the prompt. Expand your idea concisely." if st.session_state.languages == "English"
-                   else "프롬프트를 언급하지 말고 자신의 주장을 간결하고 논리적으로 이어가세요.")
+                + ("Do not mention the prompt. Expand your idea concisely. Don't rebut." if st.session_state.languages == "English"
+                   else "프롬프트를 언급하지 말고 자신의 주장을 간결하고 논리적으로 이어가세요. 반박은 하지마시오.")
             )
             messages = [{"role": "system", "content": system_intro}] + chat["messages"]
             try:
@@ -373,14 +394,15 @@ if chat_id:
         if st.button("🧐 JudgeModel 조언"):
             st.session_state.show_model_judge = True
         if st.session_state.show_model_judge:
-            judge_instruction = {
-                "Korean": "많은 참가자 중에 제일 논리적이고 설득력 있는 사람을 딱 1명만 뽑아줘. 그 사람의 이름만 말해. 예: 'AI1'",
-                "English": (
+            judge_instruction = (
+                    "당신은 공정한 토론 심판자입니다. 대화를 읽고 어떤 AI가 더 논리적이고 설득력 있는 주장을 펼쳤는지 판단해 보세요.\n"
+                    "다음 형식으로 출력합니다.\n\n"
+                    "[우승] : AI1 또는 AI2\n[이유] : 자세한 설명"
+                    )  if st.session_state.languages == "Korean" else (
                     "You are a fair debate judge. Read the conversation and decide which AI presented the more logical and persuasive argument.\n"
                     "Output in the following format:\n\n"
                     "[Winner] : AI1 or AI2\n[Reason] : Detailed explanation"
-                )
-            }
+                    )
             judge_prompt = [
                 {"role": "system", "content": judge_instruction[st.session_state.languages]},
                 *chat["messages"]
