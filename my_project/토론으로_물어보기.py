@@ -404,7 +404,7 @@ if chat_id:
                     "[Winner] : AI1 or AI2\n[Reason] : Detailed explanation"
                     )
             judge_prompt = [
-                {"role": "system", "content": judge_instruction[st.session_state.languages]},
+                {"role": "system", "content": judge_instruction},
                 *chat["messages"]
             ]
             judge_model = "mistral"
