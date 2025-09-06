@@ -55,6 +55,11 @@ with st.sidebar:
         raw = chat_once("mistral", [{"role":"system","content":sys},{"role":"user","content":usr}], 0.7, 0.9)
         st.session_state.recommended_topics = raw.strip().split("\n")
 
+    if "recommended_topics" in st.session_state:
+        st.markdown("#### 추천 주제")
+        for t in st.session_state.recommended_topics:
+            st.markdown(t)
+
     # AI 모델 선택
     model = st.selectbox("AI 모델 선택", ollama.list()["models"], format_func=lambda m: m["model"], key="model_select")
 
