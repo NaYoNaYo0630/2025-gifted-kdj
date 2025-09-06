@@ -48,18 +48,12 @@ with st.sidebar:
     topic = st.text_input("토론 주제 입력", key="debate_topic")
 
     # 주제 추천 (AI 생성)
+    prefer = st.text_input("추천 받을 주제 입력", key="prefer")
     if st.button("🎲 주제 추천 받기"):
         sys = "다양한 토론 주제를 5개 제시해라. 간결하고 한국어로."
-        usr = "오늘 할만한 흥미로운 토론 주제를 추천해줘."
+        usr = f"{prefer}과 관련된 흥미로운 토론 주제를 추천해줘."
         raw = chat_once("mistral", [{"role":"system","content":sys},{"role":"user","content":usr}], 0.7, 0.9)
         st.session_state.recommended_topics = raw.strip().split("\n")
-
-    if "recommended_topics" in st.session_state:
-        st.markdown("#### 추천 주제")
-        for t in st.session_state.recommended_topics:
-            if st.button(t, key=f"topic_{uuid.uuid4()}"):
-                st.session_state.debate_topic = t
-                st.rerun()
 
     # AI 모델 선택
     model = st.selectbox("AI 모델 선택", ollama.list()["models"], format_func=lambda m: m["model"], key="model_select")
