@@ -98,6 +98,10 @@ if not models:
 with st.sidebar:
     st.markdown("### 🧪 번호 형식 의견 생성")
 
+    # 세션 키 초기화(덮어쓰기 방지)
+    st.session_state.setdefault("numbered_topic", "")
+    st.session_state.setdefault("numbered_contents", None)
+
     # N은 사이드바에서 고른 AI 수와 동일하게 사용 (1~N 의견)
     N = int(st.session_state.get("NumberOfAi", 2))
 
@@ -110,6 +114,7 @@ with st.sidebar:
     sb_temp = st.slider("temperature", 0.0, 1.5, 0.6, 0.1, key="sb_temp_numbered")
     sb_topp = st.slider("top_p", 0.1, 1.0, 0.95, 0.05, key="sb_topp_numbered")
 
+    # ▶ 생성 버튼: 저장만 수행
     if st.button("▶ 번호 형식 생성", key="sb_make_numbered"):
         if not (topic or "").strip():
             st.warning("주제를 입력하세요.")
@@ -146,7 +151,6 @@ with st.sidebar:
             # 부족하면 일반 줄에서 보충
             if len(by_num) < N:
                 lines = [l.strip() for l in text.splitlines() if l.strip()]
-                # 번호 없이 온 문장들을 채워넣기
                 for l in lines:
                     if len(by_num) >= N:
                         break
@@ -156,10 +160,21 @@ with st.sidebar:
             # 여전히 부족하면 빈칸으로 패딩
             contents = [by_num.get(i, "") for i in range(1, N + 1)]
 
-            # 최종 출력
-            final = topic.strip() + "\n" + "\n".join(f"{i}. {c}" for i, c in enumerate(contents, 1))
-            st.markdown("**결과**")
-            st.code(final)
+            # ✅ 결과를 세션에만 저장 (렌더 X)
+            st.session_state["numbered_topic"] = (topic or "").strip()
+            st.session_state["numbered_contents"] = contents
+            st.toast(f"의견 {len(contents)}개 저장 완료")
+
+    # ✅ 항상 세션 값을 기준으로 렌더 (다른 상호작용 후에도 유지)
+    if st.session_state.get("numbered_contents"):
+        st.markdown("**결과**")
+        if st.session_state.get("numbered_topic"):
+            st.markdown(f"- 주제: {st.session_state['numbered_topic']}")
+
+        for i, c in enumerate(st.session_state["numbered_contents"], 1):
+            st.markdown(f"**{i}.**")
+            st.code(c or "", language="text")
+
 
 selected_num = st.sidebar.selectbox(
     "Choose the number of AI",
@@ -345,10 +360,21 @@ if chat_id:
                         chat["messages"].append({"role": "user", "content": feedback})
 
                 # 4) 다음 턴을 위한 일반 반박 유도(간단 지시)
-                opponent_str = ", ".join([f"AI{k+1}" for k in range(num_ai)])
+                last_msgs = [m for m in chat["messages"] if m["role"].startswith("AI")]
+                if last_msgs:
+                    last_speaker = last_msgs[-1]["role"]
+                    last_content = last_msgs[-1]["content"]
+                    if st.session_state.languages == "Korean":
+                        rebutter = f"{last_speaker}는 이렇게 말했습니다: \"{last_content}\". 이를 반드시 반박하고, 자신의 입장을 강하게 다시 강조하세요."
+                    else:
+                        rebutter = f"{last_speaker} said: \"{last_content}\". You must rebut this argument and strongly reassert your stance."
+                else:
+                    # 발언자가 없으면 일반 지시
+                    rebutter = "반박과 자기 주장을 강화하세요." if st.session_state.languages == "Korean" else "Rebut and reinforce your stance."
+
                 chat["messages"].append({
                     "role": "user",
-                    "content": (f"{opponent_str} just said their points. Please rebut and make your own argument. No more than {max_sents} sentences.")
+                    "content": rebutter
                 })
 
     # 1. 사용자 판단 버튼
