@@ -85,3 +85,6 @@ https://www.canva.com/design/DAGy1Azdg4g/QSiqwvr251BsxdVN99_Fxg/edit?utm_content
 
 👉 **흐름 요약**  
 `사이드바 설정 → 채팅 생성 → 발언 입력 → 토론 진행 → 승자 선택/판정 확인`
+
+
+README2 링크 : https://github.com/NaYoNaYo0630/2025-gifted-kdj/blob/main/my_project/README2.md
