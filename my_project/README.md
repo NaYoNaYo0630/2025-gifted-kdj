@@ -1,3 +1,5 @@
+https://www.canva.com/design/DAGy1Azdg4g/QSiqwvr251BsxdVN99_Fxg/edit?utm_content=DAGy1Azdg4g&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton
+
 # 🤖 AI Debate Room
 
 여러 AI가 **서로 다른 입장**을 두고 토론하는 인터랙티브 앱입니다.  
