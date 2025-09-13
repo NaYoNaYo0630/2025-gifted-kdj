@@ -605,7 +605,7 @@ with st.sidebar:
                 "너는 사용자 주제에 대해 서로 대비되는 여러 입장을 만든다.\n"
                 f"출력은 **오직 {N_num}줄**, 각 줄은 숫자와 점으로 시작해야 한다. 다른 말/코드펜스/빈 줄 금지.\n"
                 f"형식 예시: 1. …\\n2. …\\n...\\n{N_num}. …\n"
-                "각 줄은 한 문장으로 간결하게, 한국어만 사용."
+                "한국어만 사용."
             )
             usr = f"주제: {topic_num}"
             raw = chat_once(
@@ -863,4 +863,3 @@ else:
         st.markdown("### ⬇️ 결과 저장")
         csv = df.to_csv(index=False).encode("utf-8-sig")
         st.download_button("결과 CSV 다운로드", data=csv, file_name="mmlu_batch_results.csv", mime="text/csv")
-
