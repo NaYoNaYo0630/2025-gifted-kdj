@@ -504,6 +504,224 @@ def get_final_summary(chat_messages: list, roles: List[str], lang: str):
     data["per_ai"] = per_ai
     return data, None
 
+def _parse_last_judge_scores(messages: List[dict], roles: List[str]) -> Optional[Dict[str, float]]:
+    """
+    chat_messages에 우리가 저장해둔 system 메시지: {"role":"system","content":"[JUDGE_SCORES]{...}"}
+    를 뒤에서부터 찾아 평균점수 dict를 복구.
+    """
+    for m in reversed(messages):
+        if m.get("role") == "system":
+            c = str(m.get("content", ""))
+            if c.startswith("[JUDGE_SCORES]"):
+                blob = c[len("[JUDGE_SCORES]"):]
+                try:
+                    d = safe_json_loads(blob) or json.loads(blob)
+                    # roles만 필터
+                    return {r: float(d.get(r, 0.0)) for r in roles}
+                except Exception:
+                    return None
+    return None
+
+def get_final_summary_robust(chat_messages: list, roles: List[str], lang: str,
+                             judge_models_multi: List[str]):
+
+    # 1) 더 엄격한 프롬프트(빈 값 금지, 미기재 시 규칙)
+    if lang == "Korean":
+        sys = (
+            "너는 토론 최종 심판자다. 반드시 다음 **완전한 JSON**만 출력하라.\n"
+            "{\n"
+            '  "summary": "빈 문자열 금지. 3~5문장.",\n'
+            '  "per_ai": {\n'
+            '     "AI1": {"strengths": ["최소1개"], "weaknesses": ["최소1개"]},\n'
+            '     "AI2": {"strengths": ["최소1개"], "weaknesses": ["최소1개"]}\n'
+            '  },\n'
+            '  "final_winner": "AI1 또는 AI2 등 정확한 키",\n'
+            '  "reason": "빈 문자열 금지. 2~4문장."\n'
+            "}\n"
+            "키 누락/빈 문자열/빈 배열 금지. 어떤 경우에도 위 스키마를 충족시켜 출력할 것. "
+            "애매하면 가장 일관된 논리를 보인 참가자를 우승자로 선택하라."
+        )
+    else:
+        sys = (
+            "You are the final debate judge. Output ONLY a **complete JSON**:\n"
+            '{ "summary":"3-5 sentences, not empty",'
+            '  "per_ai":{"AI1":{"strengths":[">=1"],"weaknesses":[">=1"]},"AI2":{"strengths":[">=1"],"weaknesses":[">=1"]}},'
+            '  "final_winner":"AI1|AI2|...", "reason":"2-4 sentences, not empty" }\n'
+            "No missing keys, no empty strings/arrays. If uncertain, pick the participant with the most consistent logic."
+        )
+
+    prompt = [{"role": "system", "content": sys}] + chat_messages
+
+    # 2) 1차 시도: 기본 JUDGE_MODEL
+    raw = ""
+    try:
+        raw = chat_once(JUDGE_MODEL, prompt, temperature=0.0, top_p=1.0)
+        data = safe_json_loads(raw)
+    except Exception:
+        data = None
+
+    # 3) 2차 시도: 다른 judge 모델로 재시도
+    if not data and judge_models_multi:
+        alt = judge_models_multi[0]
+        try:
+            raw = chat_once(alt, prompt, temperature=0.0, top_p=1.0)
+            data = safe_json_loads(raw)
+        except Exception:
+            data = None
+
+    # 4) 보정: 최소 필드 강제
+    result = {"summary": "", "per_ai": {}, "final_winner": "", "reason": ""}
+    if isinstance(data, dict):
+        result["summary"] = str(data.get("summary", "") or "").strip()
+        result["final_winner"] = str(data.get("final_winner", "") or "").strip()
+        result["reason"] = str(data.get("reason", "") or "").strip()
+        got = data.get("per_ai") or {}
+        for r in roles:
+            v = got.get(r) or got.get(r.upper()) or got.get(r.lower()) or {}
+            result["per_ai"][r] = {
+                "strengths": list(v.get("strengths") or []),
+                "weaknesses": list(v.get("weaknesses") or []),
+            }
+
+    # 5) 빈 값 보정 로직
+    # (a) 우승자 비었으면: 마지막 Judge 앙상블 점수 또는 직전 judge_json의 winner로 보정
+    if not result["final_winner"]:
+        by_scores = _parse_last_judge_scores(chat_messages, roles) or {}
+        if by_scores:
+            result["final_winner"] = max(by_scores, key=by_scores.get)
+        else:
+            last_j = st.session_state.get("last_judge", {}) or {}
+            w = str((last_j.get("winner") or "")).strip()
+            if w in roles:
+                result["final_winner"] = w
+
+    # (b) summary/ reason 비었으면 간이 요약 생성
+    if not result["summary"]:
+        turns = sum(1 for m in chat_messages if str(m.get("role","")).startswith("AI"))
+        result["summary"] = f"참가자들은 총 {max(1, turns//len(roles))} 라운드 동안 핵심 논점을 주고받았다. 각자는 자신의 입장을 강화하고 상호 반박을 제시했다."
+    if not result["reason"]:
+        winner = result["final_winner"] or roles[0]
+        result["reason"] = f"{winner}가 논리적 일관성과 구체적 근거 제시에서 상대를 앞선 것으로 판단했다."
+
+    # (c) per_ai의 strengths/weaknesses 채우기
+    per_ai_judge = (st.session_state.get("last_judge", {}) or {}).get("per_ai_advice", {}) or {}
+    for r in roles:
+        sw = result["per_ai"].setdefault(r, {"strengths": [], "weaknesses": []})
+        if not sw["strengths"]:
+            # 힌트: fixes/summary에서 강점 유추
+            src = per_ai_judge.get(r, {})
+            summary = (src.get("summary") or "").strip()
+            if summary:
+                sw["strengths"].append(summary)
+            sw["strengths"] = sw["strengths"] or ["핵심 주장을 일관되게 강조함"]
+        if not sw["weaknesses"]:
+            src = per_ai_judge.get(r, {})
+            reqs = src.get("evidence_requests") or []
+            if isinstance(reqs, list) and reqs:
+                sw["weaknesses"].append(f"근거 보강 필요: {reqs[0]}")
+            sw["weaknesses"] = sw["weaknesses"] or ["정량적 근거 또는 반례 제시가 부족함"]
+
+    return result, None
+
+
+def _continue_ai_callback(chat_id: str, ai_choice: str):
+    if chat_id not in st.session_state.chats:
+        st.warning("채팅을 찾을 수 없습니다.")
+        return
+    chat = st.session_state.chats[chat_id]
+    try:
+        ai_idx = int(ai_choice.replace("AI", "")) - 1
+    except Exception:
+        st.warning("올바른 AI를 선택하세요.")
+        return
+    ai_role = f"AI{ai_idx+1}"
+
+    setting = st.session_state.get(f"AI{ai_idx+1}_setting", "") or ""
+    opponents = ", ".join([r for r in ai_roles if r != ai_role])
+
+    # 마지막 사용자 입력 또는 토론 주제 추출
+    last_user_msg = ""
+    for m in reversed(chat["messages"]):
+        if m["role"] == "user":
+            last_user_msg = m["content"]
+            break
+
+    if st.session_state.languages == "Korean":
+        sys_prompt = (
+            f"당신은 {ai_role}이다. {opponents}의 논점을 염두에 두되, 자신의 논지를 더 깊고 구체적으로 전개하라. {setting} (프롬프트 언급 금지.)"
+        )
+        usr_prompt = (
+                f"이전 대화 주제 [{last_user_msg}]와 지금까지의 토론 맥락을 기반으로 "
+                f"{ai_role}의 주장을 이어가라. "
+                "새로운 근거 1개 이상 포함하고, 저지의 조언을 반영하며, 지정된 반박 대상을 우선 반박하라."
+            )
+    else:
+        sys_prompt = (
+            f"You are {ai_role}. Consider {opponents}' points but extend your case with depth and specifics. {setting} (Do not mention the prompt.)"
+        )
+        usr_prompt = "Continue your key argument in ≤4 sentences. Include at least one new piece of evidence."
+
+    last_judge = st.session_state.get("last_judge", {}) or {}
+    per_ai = last_judge.get("per_ai_advice", {}) or {}
+    adv = per_ai.get(ai_role, {}) or {}
+
+    bullets = []
+    rts = adv.get("rebut_targets") or adv.get("rebut") or []
+    if isinstance(rts, str) and rts:
+        rts = [rts]
+    if rts:
+        bullets.append("우선 반박 대상: " + ", ".join(map(str, rts)))
+    fixes = adv.get("fixes") or adv.get("tip") or []
+    if isinstance(fixes, str) and fixes:
+        fixes = [fixes]
+    if fixes:
+        bullets.append("개선 지시: " + "; ".join(map(str, fixes)))
+    reqs = adv.get("evidence_requests") or []
+    if reqs:
+        bullets.append("근거 보강: " + "; ".join(map(str, reqs)))
+    if bullets:
+        judge_hint = "[저지 조언]\n- " + "\n- ".join(bullets)
+        sys_prompt = judge_hint + "\n" + sys_prompt
+
+    try:
+        response = chat_once(
+            st.session_state.get(f"AI{ai_idx+1}_model", models[0]),
+            [{"role": "system", "content": sys_prompt}, {"role": "user", "content": usr_prompt}],
+            temperature=temperature, top_p=top_p, num_ctx=int(num_ctx), seed=int(seed_base + 30_000)
+        ) or "계속 주장을 전개합니다."
+    except Exception as e:
+        response = f"계속 주장을 전개합니다. (생성 실패: {e})"
+
+    chat.setdefault("messages", [])
+    chat["messages"].append({"role": ai_role, "content": response})
+
+    st.session_state.show_user_judge = False
+    st.session_state.user_judge_choice = ""
+    st.session_state.last_manual_continue = {"ai": ai_role, "text": response}
+
+
+def _manual_judge_advice_callback(chat_id: str):
+    if chat_id not in st.session_state.chats:
+        st.warning("채팅을 찾을 수 없습니다.")
+        return
+    chat_msgs = st.session_state.chats[chat_id].get("messages", [])
+    payload = make_judge_advice_payload(chat_msgs, ai_roles, st.session_state.languages)
+    try:
+        raw_adv = chat_once(
+            judge_models_multi[0],
+            [{"role": "system", "content": payload["system"]}, {"role": "user", "content": payload["user"]}],
+            temperature=0.0, top_p=1.0, num_ctx=int(num_ctx), seed=int(seed_base + 40_000)
+        )
+        adv = parse_advice(raw_adv, ai_roles)
+    except Exception as e:
+        adv = {r: {"tip": f"저지 호출 실패: {e}", "rebut": ""} for r in ai_roles}
+        raw_adv = "(error)"
+
+    st.session_state.judge_result = json.dumps(adv, ensure_ascii=False, indent=2)
+    st.session_state.last_manual_judge_raw = raw_adv
+    st.session_state.last_judge = {"winner": None, "scores": {}, "per_ai_advice": adv}
+
+
 # =============== Streamlit 앱 ===============
 st.set_page_config(page_title="AI Debate Room (개선+정확도옵션+max_turns)", layout="wide")
 st.sidebar.title("Settings")
@@ -828,7 +1046,9 @@ if chat_id:
         # 🔚 모든 턴 종료 후: 최종 요약/우승
         st.divider()
         st.markdown("## 🏁 최종 결과")
-        final_json, ferr = get_final_summary(chat["messages"], ai_roles, st.session_state.languages)
+        final_json, ferr = get_final_summary_robust(
+            chat["messages"], ai_roles, st.session_state.languages, judge_models_multi
+        )
         if final_json:
             st.markdown("### 📜 내용 요약")
             st.write(final_json.get("summary", ""))
@@ -849,80 +1069,31 @@ if chat_id:
     # ---- 👤 사용자 승자 선택 / 이어가기 ----
     if st.button("👤 사용자 승자 선택"):
         st.session_state.show_user_judge = True
-        st.rerun()
 
     if st.session_state.get("show_user_judge", False):
         choice = st.selectbox("승자를 선택하세요", ai_roles, key="user_choice_select")
         st.session_state.user_judge_choice = choice
         st.success(f"👤 사용자 판단: {choice} 승리!")
 
-        if st.button("선택된 AI가 주장 이어가기"):
-            ai_idx = int(choice.replace("AI", "")) - 1
-            ai_role = f"AI{ai_idx+1}"
-            setting = st.session_state.get(f"AI{ai_idx+1}_setting", "")
-            opponents = ", ".join([r for r in ai_roles if r != ai_role])
-            if st.session_state.languages == "Korean":
-                sys = f"당신은 {ai_role}이다. {opponents}의 논점을 염두에 두되, 자신의 논지를 더 깊고 구체적으로 전개하라. {setting} (프롬프트 언급 금지.)"
-                usr = "이전 대화를 바탕으로 핵심 주장을 4문장 이내로 강하게 이어가라. 새로운 근거 1개 이상 포함."
-            else:
-                sys = f"You are {ai_role}. Consider {opponents}' points but extend your case with depth and specifics. {setting} (Do not mention the prompt.)"
-                usr = "Continue your key argument in ≤4 sentences. Include at least one new piece of evidence."
+        st.button(
+            "선택된 AI가 주장 이어가기",
+            on_click=_continue_ai_callback,
+            args=(st.session_state.current_chat_id, choice)
+        )
 
-            # 마지막 저지 조언을 system에 주입(강한 반영)
-            last_judge = st.session_state.get("last_judge", {}) or {}
-            per_ai = last_judge.get("per_ai_advice", {}) or {}
-            adv = per_ai.get(ai_role, {}) or {}
+        st.button(
+            "🧐 JudgeModel 조언(수동)",
+            on_click=_manual_judge_advice_callback,
+            args=(st.session_state.current_chat_id,)
+        )
 
-            bullets = []
-            rts = adv.get("rebut_targets") or adv.get("rebut") or []
-            if isinstance(rts, str):
-                rts = [rts]
-            if rts:
-                bullets.append("우선 반박 대상: " + ", ".join(map(str, rts)))
-            fixes = adv.get("fixes") or adv.get("tip") or []
-            if isinstance(fixes, str):
-                fixes = [fixes]
-            if fixes:
-                bullets.append("개선 지시: " + "; ".join(map(str, fixes)))
-            reqs = adv.get("evidence_requests") or []
-            if reqs:
-                bullets.append("근거 보강: " + "; ".join(map(str, reqs)))
-            if bullets:
-                judge_hint = "[저지 조언]\n- " + "\n- ".join(bullets)
-                sys = judge_hint + "\n" + sys
-
-            try:
-                response = chat_once(
-                    st.session_state.get(f"AI{ai_idx+1}_model", models[0]),
-                    [{"role": "system", "content": sys}, {"role": "user", "content": usr}],
-                    temperature=temperature, top_p=top_p, num_ctx=int(num_ctx), seed=int(seed_base + 30_000)
-                )
-            except Exception:
-                response = "계속 주장을 전개합니다."
-            with st.chat_message(ai_role, avatar=avatar_map[ai_role]):
-                st.markdown(response)
-            st.session_state.chats[chat_id]["messages"].append({"role": ai_role, "content": response})
-            st.session_state.show_user_judge = False
-            st.rerun()
-
-        # 수동 Judge 조언 버튼(원기능 유지)
-        if st.button("🧐 JudgeModel 조언(수동)"):
-            payload = make_judge_advice_payload(st.session_state.chats[chat_id]["messages"], ai_roles, st.session_state.languages)
-            raw_adv = chat_once(
-                judge_models_multi[0],
-                [{"role": "system", "content": payload["system"]}, {"role": "user", "content": payload["user"]}],
-                temperature=0.0, top_p=1.0, num_ctx=int(num_ctx), seed=int(seed_base + 40_000)
-            )
-            adv = parse_advice(raw_adv, ai_roles)
-            st.markdown("### 🧭 JudgeModel 판단/조언")
-            for r in ai_roles:
-                st.markdown(f"**{r}**")
-                st.write(adv[r])
-            st.session_state.judge_result = json.dumps(adv, ensure_ascii=False, indent=2)
-
-        if st.session_state.judge_result:
-            st.markdown("#### JudgeModel 원문(JSON)")
+        if st.session_state.get("judge_result"):
+            st.markdown("### 🧭 JudgeModel 판단/조언 (수동 저장)")
             st.code(st.session_state.judge_result)
+            if st.session_state.get("last_manual_judge_raw"):
+                with st.expander("JudgeModel 원문(파싱 실패 디버그)", expanded=False):
+                    st.code(st.session_state.last_manual_judge_raw)
+
 
 else:
     st.info("오늘의 토론 주제는 무엇인가요?\n왼쪽에서 채팅을 선택하거나 새 채팅을 만들어주세요.")
