@@ -160,7 +160,7 @@ def make_bundle_system(roles: List[str], lang: str, max_sents: int) -> str:
     return (
         f"너는 다음 참가자들을 동시에 연기한다: {keys_line}.\n"
         f"{lang_line}. 각 참가자는 자신의 고정 입장(setting)을 강하게 옹호하고, 중립 표현을 피하며, "
-        f"다른 참가자의 주장 약점을 최소 1회 지적한다. 각 발언은 최대 {max_sents}문장.\n\n"
+        f"다른 참가자의 주장 약점을 최소 1회 지적한다. 각 발언은 {max_sents}문장으로 맞춰서.\n\n"
         "출력은 **오직 하나의 JSON 객체**로 하고, 다른 설명/코드펜스/주석 금지. "
         "키는 아래와 정확히 일치해야 한다.\n"
         "{\n" + json_schema_lines + "\n}"
@@ -435,31 +435,84 @@ def ensemble_judge_scores(
     messages: List[dict], roles: List[str],
     num_ctx: int, seed_base: int
 ) -> Dict[str, float]:
+    # --- 세션 키 보존 초기화(덮어쓰지 않음) ---
+    st.session_state.setdefault("_judge_logs", [])        # 최근 N개 미리보기
+    st.session_state.setdefault("_judge_logs_all", [])    # 전체 누적(상시 패널용)
+    st.session_state.setdefault("_judge_stds", {})        # 표준편차
+    st.session_state.setdefault("_judge_means", {})       # 평균(최근 턴 결과)
+    st.session_state.setdefault("_judge_last_scores_raw", [])  # 원문 JSON 라인들(디버그)
+
     totals = {r: 0.0 for r in roles}
     squares = {r: 0.0 for r in roles}
     logs = []
+    raw_lines = []
+
     for v in range(n_judge):
         jm = judge_models_multi[v % len(judge_models_multi)]
         payload = make_judge_scores_payload(messages, roles, st.session_state.languages)
-        raw = chat_once(
-            jm,
-            [{"role": "system", "content": payload["system"]},
-             {"role": "user", "content": payload["user"]}],
-            temperature=0.0, top_p=1.0, num_ctx=int(num_ctx), seed=int(seed_base + v)
-        )
-        scores = parse_role_scores(raw, roles)
-        logs.append(f"[{jm}] {raw}")
+
+        seed = int(seed_base + v)
+        raw = ""
+        try:
+            raw = chat_once(
+                jm,
+                [{"role": "system", "content": payload["system"]},
+                 {"role": "user", "content": payload["user"]}],
+                temperature=0.0, top_p=1.0, num_ctx=int(num_ctx), seed=seed
+            )
+        except Exception as e:
+            # 호출 실패도 로그로 남김
+            raw = f'{{"error":"judge_call_failed","detail":"{str(e)}"}}'
+
+        # 파싱(실패해도 0점 처리 + 로그 유지)
+        try:
+            scores = parse_role_scores(raw, roles)
+        except Exception:
+            scores = {r: 0.0 for r in roles}
+
+        # 누적 합/제곱합
         for r in roles:
             s = float(scores.get(r, 0.0))
             totals[r] += s
             squares[r] += s * s
+
+        # 구조화된 로그 라인(모델/시드/원문/파싱 결과)
+        log_entry = {
+            "model": jm,
+            "seed": seed,
+            "parsed": {r: float(scores.get(r, 0.0)) for r in roles},
+            "raw": raw.strip()
+        }
+        # 미리보기용 간단 라인
+        logs.append(f"[{jm} seed={seed}] {raw}".strip())
+        # 디버그용 원문/파싱 함께 저장
+        raw_lines.append(log_entry)
+
+    # 평균/표준편차
     means = {r: totals[r] / max(1, n_judge) for r in roles}
     if n_judge > 1:
         stds = {r: (squares[r] / n_judge - means[r] ** 2) ** 0.5 for r in roles}
     else:
         stds = {r: 0.0 for r in roles}
+
+    # --- 세션 상태 업데이트(누적 + 최근) ---
+    # 최근 5줄
     st.session_state["_judge_logs"] = logs[-min(5, len(logs)):]
+    # 전체 누적(최대 300줄 유지)
+    st.session_state["_judge_logs_all"].extend(logs)
+    if len(st.session_state["_judge_logs_all"]) > 300:
+        st.session_state["_judge_logs_all"] = st.session_state["_judge_logs_all"][-300:]
+
+    # 원문/파싱 상세도 누적(최근 60개 정도만 유지)
+    st.session_state["_judge_last_scores_raw"].extend(raw_lines)
+    if len(st.session_state["_judge_last_scores_raw"]) > 60:
+        st.session_state["_judge_last_scores_raw"] = st.session_state["_judge_last_scores_raw"][-60:]
+
+    # 표준편차/평균/리더 저장(다른 패널에서 재사용)
     st.session_state["_judge_stds"] = stds
+    st.session_state["_judge_means"] = means
+    st.session_state["_judge_leader"] = max(roles, key=lambda r: means.get(r, 0.0)) if roles else None
+
     return means
 
 # 최종 요약 저지
@@ -812,6 +865,11 @@ if st.sidebar.button("▶ 번호 형식 생성", key="sb_make_numbered"):
         st.session_state["numbered_topic"] = (topic or "").strip()
         st.session_state["numbered_contents"] = _make_numbered(gen_model, topic, num_ai)
         st.sidebar.success(f"의견 {num_ai}개 저장 완료")
+        
+        for i, c in enumerate(st.session_state["numbered_contents"] or [], 1):
+            st.session_state[f"AI{i}_setting"] = c or st.session_state.get(f"AI{i}_setting", "")
+        st.rerun()
+        st.sidebar.success(f"의견 {num_ai}개 자동 입력 완료")
 
 if st.session_state.get("numbered_contents"):
     st.sidebar.markdown("**결과**")
@@ -823,11 +881,54 @@ if st.session_state.get("numbered_contents"):
 
 
 # 공통 생성 하이퍼파라미터
-st.sidebar.markdown("### ⚙️ 생성 파라미터 (조정해도 유의미한 변화 없음)")
-temperature = st.sidebar.slider("temperature", 0.0, 1.5, 0.4, 0.1)
-top_p = st.sidebar.slider("top_p", 0.1, 1.0, 0.9, 0.05)
-max_sents = st.sidebar.slider("발언 문장 수(권장 최대)", 3, 8, 6, 1)
-max_turns = st.sidebar.slider("토론 최대 턴수", 1, 8, 3, 1)
+st.sidebar.markdown("### ⚙️ 생성 파라미터", help="초기 세팅 최적화 상태입니다.")
+
+# 기본값 초기화 (최초 실행 시만)
+st.session_state.setdefault("temperature", 0.3)
+st.session_state.setdefault("top_p", 0.9)
+st.session_state.setdefault("max_sents", 6)
+st.session_state.setdefault("max_turns", 3)
+
+#가로로 프리셋 버튼
+col1, col2, col3 = st.sidebar.columns(3)
+
+with col1:
+    if st.button("best", key="best_setting",help="가장 안정적이고 효율적입니다."):
+        st.session_state.temperature = 0.3
+        st.session_state.top_p = 0.9
+        st.session_state.max_sents = 6
+        st.session_state.max_turns = 3
+        st.rerun()
+
+with col2:
+    if st.button("fast", key="fast_setting", help="가볍고 빨라서 실험/디버그에 좋습니다."):
+        st.session_state.temperature = 0.2
+        st.session_state.top_p = 0.8
+        st.session_state.max_sents = 2
+        st.session_state.max_turns = 1
+        st.rerun()
+
+with col3:
+    if st.button("creative", key="various_setting", help="느린 대신 더욱 창의적이고 다양한 의견을 제시합니다."):
+        st.session_state.temperature = 0.7
+        st.session_state.top_p = 1.0
+        st.session_state.max_sents = 8
+        st.session_state.max_turns = 4
+        st.rerun()
+
+# 슬라이더에 세션 값
+temperature = st.sidebar.slider("temperature", 0.0, 1.5,
+                                st.session_state.temperature, 0.1,
+                                key="temperature")
+top_p = st.sidebar.slider("top_p", 0.1, 1.0,
+                          st.session_state.top_p, 0.05,
+                          key="top_p")
+max_sents = st.sidebar.slider("발언 문장 수(권장 최대)", 3, 8,
+                              st.session_state.max_sents, 1,
+                              key="max_sents")
+max_turns = st.sidebar.slider("토론 최대 턴수", 1, 8,
+                              st.session_state.max_turns, 1,
+                              key="max_turns")
 
 # 정확도 향상 옵션(저지 앙상블)
 st.sidebar.markdown("---")
@@ -837,11 +938,11 @@ top_k = st.sidebar.number_input("top_k", 8, 200, 40, step=8)
 repeat_penalty = st.sidebar.number_input("repeat_penalty", 1.0, 2.0, 1.1, step=0.05)
 seed_base = st.sidebar.number_input("seed", 0, 10_000_000, 42, step=1)
 
-n_judge = st.sidebar.slider("저지 표 수(n_judge)", 1, 9, 5, step=2, help='이 값은 토론 시간에 큰 영향을 미칩니다. 1~3 추천')
+n_judge = st.sidebar.slider("저지 표 수(n_judge)", 1, 9, 3, step=2, help='이 값은 토론 시간에 큰 영향을 미칩니다. 1~3 추천')
 judge_models_multi = st.sidebar.multiselect(
     "저지 모델(복수 선택 가능)",
     models,
-    default=[m for m in ["mistral", "gemma3:latest"] if m in models] or [models[1]]
+    default=[m for m in ["mistral", "gemma3:latest"] if m in models] or ["exaone3.5:latest"]
 )
 if not judge_models_multi:
     judge_models_multi = [models[0]]
@@ -890,6 +991,7 @@ st.session_state.setdefault("show_model_judge", False)
 st.session_state.setdefault("user_judge_choice", "")
 st.session_state.setdefault("judge_result", "")
 st.session_state.setdefault("last_role_scores", {})
+st.session_state.setdefault("judge_logs_all", [])
 st.session_state.setdefault("_judge_logs", [])
 st.session_state.setdefault("_judge_stds", {})
 
@@ -1067,10 +1169,7 @@ if chat_id:
             st.warning(f"최종 요약 오류: {ferr or '알 수 없는 오류'}")
 
     # ---- 👤 사용자 승자 선택 / 이어가기 ----
-    if st.button("👤 사용자 승자 선택"):
-        st.session_state.show_user_judge = True
-
-    if st.session_state.get("show_user_judge", False):
+    if st.toggle("👤 사용자 승자 선택", key="toggle_user_judge"):
         choice = st.selectbox("승자를 선택하세요", ai_roles, key="user_choice_select")
         st.session_state.user_judge_choice = choice
         st.success(f"👤 사용자 판단: {choice} 승리!")
@@ -1080,6 +1179,7 @@ if chat_id:
             on_click=_continue_ai_callback,
             args=(st.session_state.current_chat_id, choice)
         )
+
 
         st.button(
             "🧐 JudgeModel 조언(수동)",
@@ -1097,3 +1197,11 @@ if chat_id:
 
 else:
     st.info("오늘의 토론 주제는 무엇인가요?\n왼쪽에서 채팅을 선택하거나 새 채팅을 만들어주세요.")
+
+st.divider()
+with st.expander("🧑‍⚖️ 저지 로그(전체 누적 · 최근 300줄 보관)", expanded=False):
+    if st.session_state.get("_judge_logs_all"):
+        for line in st.session_state["_judge_logs_all"][-50:]:  # UI 부담 줄이려 최근 50줄만
+            st.code(line)
+    else:
+        st.caption("아직 기록된 저지 로그가 없습니다.")
