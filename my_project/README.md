@@ -88,3 +88,4 @@ https://www.canva.com/design/DAGy1Azdg4g/QSiqwvr251BsxdVN99_Fxg/edit?utm_content
 
 
 README2 링크 : https://github.com/NaYoNaYo0630/2025-gifted-kdj/blob/main/my_project/README2.md
+<img width="285" height="316" alt="image" src="https://github.com/user-attachments/assets/1c5fb402-6451-43c9-a032-8f30487bc5e3" />
